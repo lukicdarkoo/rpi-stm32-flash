@@ -18,6 +18,8 @@ FLASH_ADDRESS = (0x08000000, 0x08080000)
 
 ACK = 0x79
 NACK = 0x1F
+SYNC_BYTE = 0x5A
+SYNC_BYTE_RESP = 0xA5
 
 
 logger = logging.getLogger()
@@ -25,7 +27,42 @@ spi = spidev.SpiDev()
 
 
 def spi_xfer(data):
-    return spi.xfer2(data, 500000, 500)
+    return spi.xfer2(data, 500000, 50)
+
+
+def ack():
+    logger.debug('ACK: Starting...')
+    recv = spi_xfer([0x00])
+    while True:
+        recv = spi_xfer([0x00])
+        logger.debug('ACK: Received %s' % hex(recv[0]))
+        if recv[0] == NACK:
+            raise Exception('NACK received')
+        elif recv[0] == ACK:
+            return
+        else:
+            #raise Exception('Garbage received')
+            time.sleep(0.1)
+            # return
+    spi_xfer([0x79])
+
+
+def sync_frame():
+    logger.info('Syncing SPI...')
+    recv = spi_xfer([SYNC_BYTE])
+    if recv[0] != SYNC_BYTE_RESP:
+        raise Exception('Sync byte response not correct')
+        
+    logger.debug('ACK: Starting...')
+    recv = spi_xfer([0x00])
+    logger.debug('ACK: Dummy byte received %s' % hex(recv[0]))
+    recv = spi_xfer(recv)
+    logger.debug('ACK: Received %s' % hex(recv[0]))
+    if recv[0] == NACK:
+        raise Exception('NACK received')
+    if recv[0] != ACK:
+        raise Exception('Garbage received')
+    #recv = spi_xfer([ACK])
 
 
 def bootloader_init():
@@ -50,15 +87,7 @@ def bootloader_init():
     
     # Bootloader SPI synchronization frame
     # Source: SPI protocol used in the STM32 bootloader (p. 6)
-    logger.info('Syncing SPI...')
-    recv = spi_xfer([0x5A])
-    logger.debug('Received %s' % recv)
-    recv = spi_xfer([0x00])
-    logger.debug('Received %s' % recv)
-    recv = spi_xfer(recv)
-    logger.debug('Received %s' % recv)
-    if recv[0] != ACK:
-        raise Exception('ACK not received')
+    # sync_frame()
 
 
 def bootloader_write(data, start_address=FLASH_ADDRESS[0]):
@@ -68,9 +97,10 @@ def bootloader_write(data, start_address=FLASH_ADDRESS[0]):
     # Send command
     logger.info('Writting data to MCU...')
     recv = spi_xfer([0x5A, 0x31, 0xCE])
-    logger.debug('Received %s' % recv)
-    #recv = spi_xfer([0x00, 0x00, 0x79])
-    #logger.debug('Received %s' % recv)
+    print(recv)
+    if recv[2] != ACK:
+        raise('ACK not received')
+    ack()
 
     # Send start address
     start_bytes = [
@@ -83,15 +113,17 @@ def bootloader_write(data, start_address=FLASH_ADDRESS[0]):
         start_bytes[1] ^ \
         start_bytes[2] ^ \
         start_bytes[3]
-    recv = spi_xfer(start_bytes + [start_checksum])
-    logger.debug('Received %s' % recv)
+    spi.writebytes(start_bytes + [start_checksum])
+    #logger.debug('Received %s' % map(hex, recv))
+    ack()
 
     # Send number of bytes + data + checksum
+    time.sleep(0.01)
     if len(data) % 2 == 1:
       data += [ 0xFF ]
-    cs = reduce((lambda x, y: x ^ y), [ len(data) ] + data, 0)
-    recv = spi_xfer([ len(data) ] + data + [cs])
-    logger.debug('Received %s' % recv)
+    cs = reduce((lambda x, y: x ^ y), [ len(data) - 1] + data, 0)
+    spi.writebytes([ len(data) -1 ] + data + [cs])
+    ack()
 
 
 def main():
@@ -102,15 +134,26 @@ def main():
     logger.addHandler(handler)
 
     bootloader_init()
-
+    sync_frame()
     with open('./blink.bin', 'rb') as f:
         start_address = FLASH_ADDRESS[0]
         while True:
-            bytes_chunk = f.read(256)
+            bytes_chunk = map(ord, f.read(256))
             if not bytes_chunk:
                 break
             else:
-                bootloader_write(bytes_chunk, start_address)
+                while True:
+                    
+                    try:
+                        logger.info("Writing from %s to %s" % 
+                            (hex(start_address), hex(start_address + len(bytes_chunk)))
+                        )
+                        bootloader_write(bytes_chunk, start_address)
+                        break
+                    except Exception as e:
+                        raise
+                        logger.warning('Repeating transaction...')
+
                 start_address += 256
 
 main()

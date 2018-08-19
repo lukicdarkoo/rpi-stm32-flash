@@ -52,7 +52,7 @@ def sync_frame():
     recv = spi_xfer([SYNC_BYTE])
     if recv[0] != SYNC_BYTE_RESP:
         raise Exception('Sync byte response not correct')
-        
+
     logger.debug('ACK: Starting...')
     recv = spi_xfer([0x00])
     logger.debug('ACK: Dummy byte received %s' % hex(recv[0]))
@@ -62,15 +62,17 @@ def sync_frame():
         raise Exception('NACK received')
     if recv[0] != ACK:
         raise Exception('Garbage received')
-    #recv = spi_xfer([ACK])
-
+    recv = spi_xfer([0x79])
+    logger.debug('ACK: Received %s' % hex(recv[0]))
 
 def bootloader_init():
     # Initialize SPI and GPIOs
     wiringpi.wiringPiSetup()
+    #wiringpi.wiringPiSPISetup (0, 500000)
+
     spi.open(0, 0)
-    wiringpi.pinMode(SPI_CE0_PIN, 1)
-    wiringpi.pinMode(SPI_CE1_PIN, 1)
+    #wiringpi.pinMode(SPI_CE0_PIN, 1)
+    #wiringpi.pinMode(SPI_CE1_PIN, 1)
     wiringpi.pinMode(CPU_BOOT0_PIN, 1)
     wiringpi.pinMode(CPU_NRST_PIN, 1)
 
@@ -78,8 +80,8 @@ def bootloader_init():
     # Source: STM32 microcontroller system memory boot mode (p. 20, p. 279)
     logger.info('Activating bootloader...')
     wiringpi.digitalWrite(CPU_NRST_PIN, 0)
-    wiringpi.digitalWrite(SPI_CE0_PIN, 1)
-    wiringpi.digitalWrite(SPI_CE1_PIN, 1)
+    #wiringpi.digitalWrite(SPI_CE0_PIN, 0)
+    #wiringpi.digitalWrite(SPI_CE1_PIN, 1)
     wiringpi.digitalWrite(CPU_BOOT0_PIN, 1)
     time.sleep(0.5)
     wiringpi.digitalWrite(CPU_NRST_PIN, 1)
@@ -97,8 +99,7 @@ def bootloader_write(data, start_address=FLASH_ADDRESS[0]):
     # Send command
     logger.info('Writting data to MCU...')
     recv = spi_xfer([0x5A, 0x31, 0xCE])
-    print(recv)
-    if recv[2] != ACK:
+    if recv[0] != ACK:
         raise('ACK not received')
     ack()
 
@@ -113,7 +114,7 @@ def bootloader_write(data, start_address=FLASH_ADDRESS[0]):
         start_bytes[1] ^ \
         start_bytes[2] ^ \
         start_bytes[3]
-    spi.writebytes(start_bytes + [start_checksum])
+    spi_xfer(start_bytes + [start_checksum])
     #logger.debug('Received %s' % map(hex, recv))
     ack()
 
@@ -122,8 +123,36 @@ def bootloader_write(data, start_address=FLASH_ADDRESS[0]):
     if len(data) % 2 == 1:
       data += [ 0xFF ]
     cs = reduce((lambda x, y: x ^ y), [ len(data) - 1] + data, 0)
-    spi.writebytes([ len(data) -1 ] + data + [cs])
+    spi_xfer([ len(data) -1 ] + data + [cs])
     ack()
+
+
+def bootloader_read(start_address, n):
+    logger.info('Writting data to MCU...')
+    recv = spi_xfer([0x5A, 0x11, 0xEE])
+    if recv[0] != ACK:
+        raise('ACK not received')
+    ack()
+
+    # Send start address
+    start_bytes = [
+        (start_address >> 24) & 0xFF,
+        (start_address >> 16) & 0xFF,
+        (start_address >> 8) & 0xFF,
+        (start_address >> 0) & 0xFF
+    ]
+    start_checksum = start_bytes[0] ^ \
+        start_bytes[1] ^ \
+        start_bytes[2] ^ \
+        start_bytes[3]
+    spi_xfer(start_bytes + [start_checksum])
+    #logger.debug('Received %s' % map(hex, recv))
+    ack()
+
+    spi_xfer([n, n ^ 0xFF])
+    ack()
+
+    return spi_xfer([1] * n)
 
 
 def main():
@@ -135,6 +164,11 @@ def main():
 
     bootloader_init()
     sync_frame()
+
+    data = bootloader_read(FLASH_ADDRESS[0], 10)
+    print(map(hex, data))
+    exit()
+
     with open('./blink.bin', 'rb') as f:
         start_address = FLASH_ADDRESS[0]
         while True:
